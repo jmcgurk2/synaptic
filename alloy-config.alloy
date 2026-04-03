@@ -1,0 +1,23 @@
+prometheus.scrape "synaptic_api" {
+  targets = [{
+    __address__ = "synaptic-api:8000",
+  }]
+  metrics_path = "/metrics"
+  scrape_interval = "30s"
+  forward_to = [prometheus.remote_write.default.receiver]
+}
+
+prometheus.scrape "node_exporter" {
+  targets = [{
+    __address__ = "synaptic-node-exporter:9100",
+  }]
+  metrics_path = "/metrics"
+  scrape_interval = "30s"
+  forward_to = [prometheus.remote_write.default.receiver]
+}
+
+prometheus.remote_write "default" {
+  endpoint {
+    url = "http://10.44.44.10:9090/api/v1/write"
+  }
+}

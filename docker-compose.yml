@@ -1,0 +1,53 @@
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: synaptic-qdrant
+    restart: unless-stopped
+    volumes:
+      - ./data/qdrant:/qdrant/storage
+    ports:
+      - "6333:6333"
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+
+  api:
+    build: ./api
+    container_name: synaptic-api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/data
+    env_file: .env
+    depends_on:
+      - qdrant
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+
+  node-exporter:
+    image: prom/node-exporter:latest
+    container_name: synaptic-node-exporter
+    restart: unless-stopped
+    ports:
+      - "9100:9100"
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+
+  alloy:
+    image: grafana/alloy:latest
+    container_name: synaptic-alloy
+    restart: unless-stopped
+    ports:
+      - "12345:12345"
+    volumes:
+      - ./alloy-config.alloy:/etc/alloy/config.alloy
+    deploy:
+      resources:
+        limits:
+          memory: 256M
