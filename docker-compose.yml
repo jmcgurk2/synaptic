@@ -28,26 +28,3 @@ services:
         limits:
           memory: 1G
 
-  node-exporter:
-    image: prom/node-exporter:latest
-    container_name: synaptic-node-exporter
-    restart: unless-stopped
-    ports:
-      - "9100:9100"
-    deploy:
-      resources:
-        limits:
-          memory: 64M
-
-  alloy:
-    image: grafana/alloy:latest
-    container_name: synaptic-alloy
-    restart: unless-stopped
-    ports:
-      - "12345:12345"
-    volumes:
-      - ./alloy-config.alloy:/etc/alloy/config.alloy
-    deploy:
-      resources:
-        limits:
-          memory: 256M
