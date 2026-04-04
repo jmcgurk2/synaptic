@@ -52,6 +52,10 @@ async def classify(text: str, hint: str | None = None) -> dict:
         )
 
         raw = response.choices[0].message.content.strip()
+        # Strip markdown code fences if present
+        import re as _re
+        raw = _re.sub(r"^```(?:json)?\n?", "", raw)
+        raw = _re.sub(r"\n?```$", "", raw).strip()
         result = json.loads(raw)
 
         # Validate required fields
