@@ -1,4 +1,5 @@
 import os
+import re
 import logging
 
 import httpx
@@ -33,12 +34,43 @@ def parse_webhook(payload: dict) -> dict:
     }
 
 
+def extract_hint(text: str) -> tuple[str, str | None]:
+    """Extract a #project or [project] hint prefix from the message text.
+
+    Returns (cleaned_text, hint_or_None).
+
+    Examples:
+        "#mohawk the proxmox cluster needs a reboot plan"
+        -> ("the proxmox cluster needs a reboot plan", "mohawk")
+
+        "[kitchen reno] ordered the backsplash tile from Home Depot"
+        -> ("ordered the backsplash tile from Home Depot", "kitchen reno")
+
+        "just a plain message"
+        -> ("just a plain message", None)
+    """
+    # Match #tag at start of message
+    m = re.match(r"^#(\S+)\s+(.+)", text, re.DOTALL)
+    if m:
+        return m.group(2).strip(), m.group(1).lower()
+
+    # Match [tag] at start of message
+    m = re.match(r"^\[([^\]]+)\]\s*(.+)", text, re.DOTALL)
+    if m:
+        return m.group(2).strip(), m.group(1).strip().lower()
+
+    return text, None
+
+
 def detect_intent(text: str) -> tuple[str, str]:
     """Detect command intent from message text.
 
     Returns (intent, argument) where intent is one of:
     - "fix": !fix <type> command
     - "search": !search <query> or ?<query>
+    - "report": !report <subject> — formatted report on a subject
+    - "recent": !recent — show recently updated subjects
+    - "toc": !toc — table of contents of all subjects
     - "capture": default — store as knowledge
     """
     lower = text.lower().strip()
@@ -48,6 +80,16 @@ def detect_intent(text: str) -> tuple[str, str]:
 
     if lower.startswith("!search "):
         return "search", text[8:].strip()
+
+    if lower.startswith("!report"):
+        arg = text[7:].strip()
+        return "report", arg if arg else ""
+
+    if lower.startswith("!recent"):
+        return "recent", ""
+
+    if lower.startswith("!toc"):
+        return "toc", ""
 
     if lower.startswith("?"):
         return "search", text[1:].strip()

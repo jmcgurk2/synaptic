@@ -15,6 +15,7 @@ from database import Entry, ReceiptLog, check_sqlite, get_session, init_db
 from embedder import embed, init_embedder
 from mattermost import (
     detect_intent,
+    extract_hint,
     parse_webhook,
     post_message,
     validate_webhook_token,
@@ -85,11 +86,18 @@ async def webhook(request: Request):
 
     parsed = parse_webhook(payload)
     intent, argument = detect_intent(parsed["text"])
+    digest_channel = os.getenv("MATTERMOST_DIGEST_CHANNEL_ID", parsed["channel_id"])
 
     if intent == "fix":
         return await _handle_fix_webhook(argument, parsed["channel_id"])
     elif intent == "search":
         return await _handle_search_webhook(argument, parsed["channel_id"])
+    elif intent == "report":
+        return await _handle_report_webhook(argument, digest_channel)
+    elif intent == "recent":
+        return await _handle_recent_webhook(digest_channel)
+    elif intent == "toc":
+        return await _handle_toc_webhook(digest_channel)
     else:
         return await _handle_capture_webhook(parsed["text"], parsed["channel_id"])
 
@@ -157,9 +165,13 @@ async def _handle_search_webhook(query: str, channel_id: str) -> dict:
 
 
 async def _handle_capture_webhook(text: str, channel_id: str) -> dict:
-    """Capture via webhook — run classifier, apply bouncer."""
-    req = CaptureRequest(text=text, source="@synaptic", channel_id=channel_id)
-    result = await _do_capture(req)
+    """Capture via webhook — run classifier, apply bouncer.
+    
+    Supports #project or [project] prefix hints for pre-classification.
+    """
+    clean_text, hint = extract_hint(text)
+    req = CaptureRequest(text=clean_text, source="@synaptic", channel_id=channel_id)
+    result = await _do_capture(req, hint=hint)
 
     if result.status == "held_for_review":
         if channel_id:
@@ -172,18 +184,157 @@ async def _handle_capture_webhook(text: str, channel_id: str) -> dict:
     return {"text": f"Captured as **{result.type}**: {result.title}"}
 
 
+
+async def _handle_report_webhook(subject: str, digest_channel: str) -> dict:
+    """Handle !report <subject> — generate a formatted report for a subject/project."""
+    from database import get_engine
+    from collections import defaultdict
+
+    if not subject:
+        return {"text": "Usage: `!report <subject>` — e.g. `!report mohawk` or `!report kitchen`"}
+
+    engine = get_engine()
+
+    # Search both SQLite (tag/title match) and Qdrant (semantic)
+    results = await _do_search(subject, limit=30)
+
+    if not results:
+        return {"text": f"No entries found for **{subject}**"}
+
+    # Group by type
+    by_type = defaultdict(list)
+    for r in results:
+        by_type[r.type].append(r)
+
+    # Build formatted report
+    lines = [f"## Report: {subject}", ""]
+    type_order = ["Project", "Task", "Idea", "Admin", "Contact"]
+    for t in type_order:
+        entries = by_type.get(t, [])
+        if not entries:
+            continue
+        lines.append(f"### {t}s ({len(entries)})")
+        for e in entries:
+            tags_str = ", ".join(e.tags[:4]) if e.tags else ""
+            lines.append(f"- **{e.title}** — {e.summary}")
+            if tags_str:
+                lines[-1] += f"  `{tags_str}`"
+        lines.append("")
+
+    lines.append(f"_Total: {len(results)} entries across {len(by_type)} categories_")
+    report_text = "\n".join(lines)
+
+    # Post to digest channel
+    await post_message(digest_channel, report_text)
+    return {"text": f"Report for **{subject}** posted to #synaptic-digest ({len(results)} entries)"}
+
+
+async def _handle_recent_webhook(digest_channel: str) -> dict:
+    """Handle !recent — show most recently updated subjects grouped by tag."""
+    from database import get_engine
+    from collections import defaultdict
+
+    engine = get_engine()
+    with Session(engine) as session:
+        entries = session.exec(
+            select(Entry).order_by(Entry.updated_at.desc()).limit(30)
+        ).all()
+
+    if not entries:
+        return {"text": "No entries yet."}
+
+    # Group by first tag (primary subject)
+    subjects = defaultdict(lambda: {"count": 0, "latest": None, "types": set()})
+    for e in entries:
+        tags = json.loads(e.tags) if e.tags else ["untagged"]
+        primary = tags[0] if tags else "untagged"
+        s = subjects[primary]
+        s["count"] += 1
+        s["types"].add(e.type)
+        if s["latest"] is None or e.updated_at > s["latest"]:
+            s["latest"] = e.updated_at
+
+    # Sort by most recent
+    sorted_subjects = sorted(subjects.items(), key=lambda x: x[1]["latest"], reverse=True)
+
+    lines = ["## Recently Updated Subjects", ""]
+    lines.append("| Subject | Entries | Types | Last Updated |")
+    lines.append("|---------|---------|-------|-------------|")
+    for name, info in sorted_subjects[:20]:
+        types_str = ", ".join(sorted(info["types"]))
+        date_str = info["latest"].strftime("%Y-%m-%d %H:%M") if info["latest"] else "—"
+        lines.append(f"| **{name}** | {info['count']} | {types_str} | {date_str} |")
+
+    report_text = "\n".join(lines)
+    await post_message(digest_channel, report_text)
+    return {"text": f"Recent subjects posted to #synaptic-digest ({len(sorted_subjects)} subjects)"}
+
+
+async def _handle_toc_webhook(digest_channel: str) -> dict:
+    """Handle !toc — table of contents of all stored knowledge."""
+    from database import get_engine
+    from collections import defaultdict
+
+    engine = get_engine()
+    with Session(engine) as session:
+        entries = session.exec(select(Entry)).all()
+
+    if not entries:
+        return {"text": "No entries yet."}
+
+    # Build TOC grouped by type, then by primary tag
+    by_type = defaultdict(lambda: defaultdict(list))
+    for e in entries:
+        tags = json.loads(e.tags) if e.tags else ["untagged"]
+        primary = tags[0] if tags else "untagged"
+        by_type[e.type][primary].append(e)
+
+    lines = ["## Table of Contents", ""]
+    lines.append(f"_Total: {len(entries)} entries_")
+    lines.append("")
+
+    type_order = ["Project", "Task", "Idea", "Admin", "Contact"]
+    for t in type_order:
+        subjects = by_type.get(t, {})
+        if not subjects:
+            continue
+        total = sum(len(v) for v in subjects.values())
+        lines.append(f"### {t}s ({total})")
+        # Sort subjects by entry count descending
+        for subj, ents in sorted(subjects.items(), key=lambda x: -len(x[1])):
+            if len(ents) == 1:
+                lines.append(f"- **{subj}**: {ents[0].title}")
+            else:
+                lines.append(f"- **{subj}** ({len(ents)} entries)")
+                for e in sorted(ents, key=lambda x: x.updated_at, reverse=True)[:5]:
+                    lines.append(f"  - {e.title}")
+                if len(ents) > 5:
+                    lines.append(f"  - _...and {len(ents) - 5} more_")
+        lines.append("")
+
+    report_text = "\n".join(lines)
+    await post_message(digest_channel, report_text)
+    return {"text": f"Table of contents posted to #synaptic-digest ({len(entries)} entries)"}
+
+
 # --- /capture ---
 
 
 @app.post("/capture", response_model=CaptureResponse)
 async def capture(req: CaptureRequest, session: Session = Depends(get_session)):
-    return await _do_capture(req, session)
+    return await _do_capture(req, session, hint=None)
 
 
-async def _do_capture(req: CaptureRequest, session: Session | None = None) -> CaptureResponse:
+async def _do_capture(req: CaptureRequest, session: Session | None = None, hint: str | None = None) -> CaptureResponse:
     from database import get_engine
 
-    result = await classify(req.text)
+    result = await classify(req.text, hint=hint)
+    # Inject hint tag if provided
+    if hint:
+        tags = result.get("tags", [])
+        if hint not in tags:
+            tags.insert(0, hint)
+        result["tags"] = tags
     threshold = float(os.getenv("BOUNCER_THRESHOLD", "0.70"))
     captures_today.inc()
 
