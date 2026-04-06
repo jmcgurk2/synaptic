@@ -60,3 +60,25 @@ class HealthResponse(BaseModel):
 class ContextResponse(BaseModel):
     recent: list[EntryDetail]
     pending_fix: list[EntryDetail]
+
+
+class RecallRequest(BaseModel):
+    query: str
+    project: str | None = None
+    limit: int = 20
+    mode: str = "recall"  # recall | brief
+
+
+class RecallSource(BaseModel):
+    id: str
+    title: str
+    type: str
+    project: str | None = None
+
+
+class RecallResponse(BaseModel):
+    answer: str
+    sources: list[RecallSource]
+    entry_count: int
+    query: str
+    mode: str

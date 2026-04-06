@@ -27,8 +27,11 @@ from models import (
     EntryDetail,
     FixRequest,
     HealthResponse,
+    RecallRequest,
+    RecallResponse,
     SearchResult,
 )
+from recall import recall as do_recall
 from scheduler import build_digest, init_scheduler, send_digest, shutdown_scheduler
 from vectorstore import check_qdrant, delete, init_collection, search, upsert
 
@@ -441,6 +444,75 @@ async def _handle_projects_webhook(digest_channel: str) -> dict:
     return {"text": f"Table of contents posted to #synaptic-digest ({len(entries)} entries)"}
 
 
+
+async def _handle_recall_webhook(query: str, channel_id: str) -> dict:
+    """Handle !recall <query> — synthesised answer from knowledge base."""
+    if not query:
+        return {"text": "Usage: `!recall <question>` — e.g. `!recall what do I know about the kitchen reno?`"}
+
+    results = await _do_search(query, limit=15)
+    if not results:
+        return {"text": f"No entries found for: {query}"}
+
+    entries = [
+        {
+            "id": r.id, "type": r.type, "title": r.title,
+            "summary": r.summary, "tags": r.tags,
+            "project": r.project, "raw_text": "",
+        }
+        for r in results
+    ]
+    # Enrich with raw_text from SQLite
+    from database import get_engine
+    engine = get_engine()
+    with Session(engine) as session:
+        for entry in entries:
+            row = session.exec(select(Entry).where(Entry.id == entry["id"])).first()
+            if row:
+                entry["raw_text"] = row.raw_text
+                entry["created_at"] = row.created_at.isoformat() if row.created_at else ""
+
+    result = await do_recall(query, entries, mode="recall")
+    return {"text": result["answer"]}
+
+
+async def _handle_brief_webhook(project_name: str, digest_channel: str) -> dict:
+    """Handle !brief <project> — synthesised project briefing."""
+    if not project_name:
+        return {"text": "Usage: `!brief <project>` — e.g. `!brief orex`"}
+
+    # Get all entries for this project
+    results = await _do_search(project_name, project_filter=project_name.lower(), limit=30)
+    if not results:
+        # Fall back to text search
+        results = await _do_search(project_name, limit=20)
+    if not results:
+        return {"text": f"No entries found for project **{project_name}**"}
+
+    entries = [
+        {
+            "id": r.id, "type": r.type, "title": r.title,
+            "summary": r.summary, "tags": r.tags,
+            "project": r.project, "raw_text": "",
+        }
+        for r in results
+    ]
+    from database import get_engine
+    engine = get_engine()
+    with Session(engine) as session:
+        for entry in entries:
+            row = session.exec(select(Entry).where(Entry.id == entry["id"])).first()
+            if row:
+                entry["raw_text"] = row.raw_text
+                entry["created_at"] = row.created_at.isoformat() if row.created_at else ""
+
+    result = await do_recall(project_name, entries, mode="brief")
+
+    # Post to digest channel
+    await post_message(digest_channel, f"## Brief: {project_name}\n\n{result['answer']}")
+    return {"text": f"Briefing for **{project_name}** posted to #synaptic-digest ({result['entry_count']} entries)"}
+
+
 # --- /capture ---
 
 
@@ -669,6 +741,48 @@ async def get_entry(entry_id: str, session: Session = Depends(get_session)):
     if not entry:
         return {"error": "Entry not found"}, 404
     return _entry_to_detail(entry)
+
+
+
+# --- /recall ---
+
+
+@app.post("/recall", response_model=RecallResponse)
+async def recall_endpoint(req: RecallRequest):
+    """Synthesised recall — answers questions using stored knowledge."""
+    results = await _do_search(
+        req.query,
+        project_filter=req.project,
+        limit=req.limit,
+    )
+
+    entries = [
+        {
+            "id": r.id, "type": r.type, "title": r.title,
+            "summary": r.summary, "tags": r.tags,
+            "project": r.project, "raw_text": "",
+        }
+        for r in results
+    ]
+    # Enrich with raw_text
+    from database import get_engine
+    engine = get_engine()
+    with Session(engine) as session:
+        for entry in entries:
+            row = session.exec(select(Entry).where(Entry.id == entry["id"])).first()
+            if row:
+                entry["raw_text"] = row.raw_text
+                entry["created_at"] = row.created_at.isoformat() if row.created_at else ""
+
+    result = await do_recall(req.query, entries, mode=req.mode)
+
+    return RecallResponse(
+        answer=result["answer"],
+        sources=result["sources"],
+        entry_count=result["entry_count"],
+        query=req.query,
+        mode=req.mode,
+    )
 
 
 # --- /health ---
