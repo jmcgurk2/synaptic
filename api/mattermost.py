@@ -34,45 +34,68 @@ def parse_webhook(payload: dict) -> dict:
     }
 
 
-def extract_hint(text: str) -> tuple[str, str | None]:
-    """Extract a #project or [project] hint prefix from the message text.
+def extract_project(text: str) -> tuple[str, str | None, str | None]:
+    """Extract project mode from message text.
 
-    Returns (cleaned_text, hint_or_None).
+    Returns (cleaned_text, project_name_or_None, mode_or_None).
+
+    Modes:
+    - "single": #project prefix (single-shot capture)
+    - "stream_open": [project] prefix (opens a stream)
+    - "stream_close": [done] (closes stream)
+    - None: no prefix
 
     Examples:
-        "#mohawk the proxmox cluster needs a reboot plan"
-        -> ("the proxmox cluster needs a reboot plan", "mohawk")
+        "#orex the proxmox cluster needs a reboot plan"
+        -> ("the proxmox cluster needs a reboot plan", "orex", "single")
 
-        "[kitchen reno] ordered the backsplash tile from Home Depot"
-        -> ("ordered the backsplash tile from Home Depot", "kitchen reno")
+        "[orex] ordered the backsplash tile from Home Depot"
+        -> ("ordered the backsplash tile from Home Depot", "orex", "stream_open")
+
+        "[orex]" (alone, no text after)
+        -> ("", "orex", "stream_open")
+
+        "[done]"
+        -> ("", None, "stream_close")
 
         "just a plain message"
-        -> ("just a plain message", None)
+        -> ("just a plain message", None, None)
     """
-    # Match #tag at start of message
+    # Match [done] to close stream
+    if text.lower().strip() == "[done]":
+        return "", None, "stream_close"
+
+    # Match #tag at start of message (single-shot)
     m = re.match(r"^#(\S+)\s+(.+)", text, re.DOTALL)
     if m:
-        return m.group(2).strip(), m.group(1).lower()
+        return m.group(2).strip(), m.group(1).lower(), "single"
 
-    # Match [tag] at start of message
+    # Match [tag] at start of message (stream open)
     m = re.match(r"^\[([^\]]+)\]\s*(.+)", text, re.DOTALL)
     if m:
-        return m.group(2).strip(), m.group(1).strip().lower()
+        return m.group(2).strip(), m.group(1).strip().lower(), "stream_open"
 
+    # Match [tag] alone (stream open, no following text)
+    m = re.match(r"^\[([^\]]+)\]\s*$", text, re.DOTALL)
+    if m:
+        return "", m.group(1).strip().lower(), "stream_open"
+
+    # No project prefix
+    return text, None, None
+
+
+def extract_hint(text: str) -> tuple[str, str | None]:
+    """Legacy alias for backward compatibility. Uses extract_project internally."""
+    clean_text, project, mode = extract_project(text)
+    # For backward compatibility, return (clean_text, project_hint)
+    # Only single-shot mode counts as a "hint" for the classifier
+    if mode == "single":
+        return clean_text, project
     return text, None
 
 
 def detect_intent(text: str) -> tuple[str, str]:
-    """Detect command intent from message text.
-
-    Returns (intent, argument) where intent is one of:
-    - "fix": !fix <type> command
-    - "search": !search <query> or ?<query>
-    - "report": !report <subject> — formatted report on a subject
-    - "recent": !recent — show recently updated subjects
-    - "toc": !toc — table of contents of all subjects
-    - "capture": default — store as knowledge
-    """
+    """Detect command intent from message text."""
     lower = text.lower().strip()
 
     if lower.startswith("!fix "):

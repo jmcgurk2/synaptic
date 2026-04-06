@@ -15,6 +15,7 @@ class Entry(SQLModel, table=True):
     source: str  # @synaptic | @orex | future agents
     confidence: float
     status: str  # stored | pending_fix
+    project: str | None = None  # Optional project association
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 

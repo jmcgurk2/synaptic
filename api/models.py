@@ -5,6 +5,7 @@ class CaptureRequest(BaseModel):
     text: str
     source: str = "@synaptic"
     channel_id: str | None = None
+    project: str | None = None
 
 
 class CaptureResponse(BaseModel):
@@ -15,6 +16,7 @@ class CaptureResponse(BaseModel):
     tags: list[str]
     summary: str
     confidence: float
+    project: str | None = None
 
 
 class SearchResult(BaseModel):
@@ -26,6 +28,7 @@ class SearchResult(BaseModel):
     source: str
     confidence: float
     score: float = 0.0
+    project: str | None = None
 
 
 class EntryDetail(BaseModel):
@@ -38,6 +41,7 @@ class EntryDetail(BaseModel):
     source: str
     confidence: float
     status: str
+    project: str | None = None
     created_at: str
     updated_at: str
 
