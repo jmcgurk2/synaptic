@@ -117,6 +117,8 @@ def detect_intent(text: str) -> tuple[str, str]:
     if lower.startswith("?"):
         return "search", text[1:].strip()
 
+    if lower.startswith("!projects"):
+        return "projects", ""
     return "capture", text
 
 

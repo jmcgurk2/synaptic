@@ -1,4 +1,5 @@
 import os
+from collections import defaultdict
 import logging
 from datetime import datetime, timedelta
 
@@ -30,7 +31,10 @@ async def build_digest() -> str:
             )
         ).all()
         if stale:
-            lines = [f"- **{e.title}** ({e.type}) — {e.summary}" for e in stale[:20]]
+            lines = []
+            for e in stale[:20]:
+                proj_str = f" [{e.project}]" if e.project else ""
+                lines.append(f"- **{e.title}** ({e.type}){proj_str} — {e.summary}")
             sections.append(
                 "### Stale items (>48h, tagged #pending or #review)\n" + "\n".join(lines)
             )
@@ -44,7 +48,10 @@ async def build_digest() -> str:
             )
         ).all()
         if dormant:
-            lines = [f"- **{e.title}** — last updated {e.updated_at:%Y-%m-%d}" for e in dormant[:20]]
+            lines = []
+            for e in dormant[:20]:
+                proj_str = f" [{e.project}]" if e.project else ""
+                lines.append(f"- **{e.title}**{proj_str} — last updated {e.updated_at:%Y-%m-%d}")
             sections.append(
                 "### Dormant projects (no update in 7+ days)\n" + "\n".join(lines)
             )
@@ -55,7 +62,27 @@ async def build_digest() -> str:
         ).all()
         if recent:
             lines = [f"- **{e.title}** ({e.type}, {e.source}) — {e.summary}" for e in recent]
-            sections.append("### Recent captures\n" + "\n".join(lines))
+            sections.append("### Recent captures grouped by project\n" + "\n".join(lines))
+        recent = session.exec(
+            select(Entry).order_by(Entry.created_at.desc()).limit(15)
+        ).all()
+        if recent:
+            # Group by project
+            by_project = defaultdict(list)
+            for e in recent:
+                key = e.project or "ungrouped"
+                by_project[key].append(e)
+            
+            recent_lines = []
+            for proj, ents in by_project.items():
+                if proj == "ungrouped":
+                    for e in ents:
+                        recent_lines.append(f"- **{e.title}** ({e.type}, {e.source}) — {e.summary}")
+                else:
+                    recent_lines.append(f"**[{proj}]**")
+                    for e in ents:
+                        recent_lines.append(f"  - **{e.title}** ({e.type}) — {e.summary}")
+            sections.append(f"### Recent captures\n" + "\n".join(recent_lines))
 
     if not sections:
         return "**Synaptic Morning Digest**\n\nNothing to report — your second brain is quiet."

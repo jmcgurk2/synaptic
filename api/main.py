@@ -163,6 +163,8 @@ async def webhook(request: Request):
         return await _handle_recent_webhook(digest_channel)
     elif intent == "toc":
         return await _handle_toc_webhook(digest_channel)
+    elif intent == "projects":
+        return await _handle_projects_webhook(digest_channel)
     else:
         # Capture with potentially resolved project from stream
         return await _handle_capture_webhook(
@@ -270,8 +272,10 @@ async def _handle_report_webhook(subject: str, digest_channel: str) -> dict:
 
     engine = get_engine()
 
-    # Search both SQLite (tag/title match) and Qdrant (semantic)
-    results = await _do_search(subject, limit=30)
+    # Try project-filtered search first, fall back to text search
+    results = await _do_search(subject, project_filter=subject.lower(), limit=30)
+    if not results:
+        results = await _do_search(subject, limit=30)
 
     if not results:
         return {"text": f"No entries found for **{subject}**"}
@@ -282,7 +286,11 @@ async def _handle_report_webhook(subject: str, digest_channel: str) -> dict:
         by_type[r.type].append(r)
 
     # Build formatted report
-    lines = [f"## Report: {subject}", ""]
+    is_project = any(r.project and r.project.lower() == subject.lower() for r in results)
+    if is_project:
+        lines = [f"## Report: [{subject}]", ""]
+    else:
+        lines = [f"## Report: {subject}", ""]
     type_order = ["Project", "Task", "Idea", "Admin", "Contact"]
     for t in type_order:
         entries = by_type.get(t, [])
@@ -319,13 +327,15 @@ async def _handle_recent_webhook(digest_channel: str) -> dict:
         return {"text": "No entries yet."}
 
     # Group by first tag (primary subject)
-    subjects = defaultdict(lambda: {"count": 0, "latest": None, "types": set()})
+    subjects = defaultdict(lambda: {"count": 0, "latest": None, "types": set(), "project": None})
     for e in entries:
         tags = json.loads(e.tags) if e.tags else ["untagged"]
         primary = tags[0] if tags else "untagged"
         s = subjects[primary]
         s["count"] += 1
         s["types"].add(e.type)
+        if e.project and not s["project"]:
+            s["project"] = e.project
         if s["latest"] is None or e.updated_at > s["latest"]:
             s["latest"] = e.updated_at
 
@@ -356,6 +366,45 @@ async def _handle_toc_webhook(digest_channel: str) -> dict:
 
     if not entries:
         return {"text": "No entries yet."}
+
+async def _handle_projects_webhook(digest_channel: str) -> dict:
+    """Handle !projects — list all projects with entry counts and activity."""
+    from database import get_engine
+    from collections import defaultdict
+
+    engine = get_engine()
+    with Session(engine) as session:
+        entries = session.exec(
+            select(Entry).where(Entry.project != None)
+        ).all()
+
+    if not entries:
+        return {"text": "No project-tagged entries yet. Use `#project` or `[project]` to tag captures."}
+
+    # Group by project
+    projects = defaultdict(lambda: {"count": 0, "types": defaultdict(int), "latest": None})
+    for e in entries:
+        p = projects[e.project]
+        p["count"] += 1
+        p["types"][e.type] += 1
+        if p["latest"] is None or e.updated_at > p["latest"]:
+            p["latest"] = e.updated_at
+
+    # Sort by most recent activity
+    sorted_projects = sorted(projects.items(), key=lambda x: x[1]["latest"], reverse=True)
+
+    lines = ["## Active Projects", ""]
+    lines.append("| Project | Entries | Breakdown | Last Activity |")
+    lines.append("|---------|---------|-----------|--------------|")
+    for name, info in sorted_projects:
+        breakdown = ", ".join(f"{count} {t}" for t, count in sorted(info["types"].items(), key=lambda x: -x[1]))
+        date_str = info["latest"].strftime("%Y-%m-%d %H:%M") if info["latest"] else "—"
+        lines.append(f"| **{name}** | {info['count']} | {breakdown} | {date_str} |")
+
+    report_text = "\n".join(lines)
+    await post_message(digest_channel, report_text)
+    return {"text": f"Projects posted to #synaptic-digest ({len(sorted_projects)} projects)"}
+
 
     # Build TOC grouped by type, then by primary tag
     by_type = defaultdict(lambda: defaultdict(list))
@@ -499,6 +548,7 @@ async def _do_search(
     q: str,
     type_filter: str | None = None,
     source_filter: str | None = None,
+    project_filter: str | None = None,
     limit: int = 10,
 ) -> list[SearchResult]:
     from database import get_engine
@@ -518,6 +568,8 @@ async def _do_search(
             query = query.where(Entry.type == type_filter)
         if source_filter:
             query = query.where(Entry.source == source_filter)
+    if project_filter:
+        query = query.where(Entry.project == project_filter)
         query = query.limit(limit)
 
         for e in session.exec(query).all():
@@ -536,7 +588,8 @@ async def _do_search(
     # Qdrant semantic search
     qdrant_results: list[SearchResult] = []
     try:
-        qdrant_results = await search(q, limit=limit)
+        qdrant_filters = {"project": project_filter} if project_filter else None
+        qdrant_results = await search(q, limit=limit, filters=qdrant_filters)
     except Exception as e:
         logger.error(f"Qdrant search failed: {e}")
 
@@ -556,9 +609,10 @@ async def search_endpoint(
     q: str = Query(..., min_length=1),
     type: str | None = Query(None),
     source: str | None = Query(None),
+    project: str | None = Query(None),
     limit: int = Query(10, ge=1, le=100),
 ):
-    return await _do_search(q, type_filter=type, source_filter=source, limit=limit)
+    return await _do_search(q, type_filter=type, source_filter=source, project_filter=project, limit=limit)
 
 
 # --- /context ---
