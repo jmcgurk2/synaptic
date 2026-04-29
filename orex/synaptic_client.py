@@ -36,13 +36,13 @@ class SynapticClient:
     async def search(
         self, query: str, limit: int = 5, project: str | None = None
     ) -> list[dict[str, Any]]:
-        """POST /search — semantic search across all sources."""
-        payload: dict[str, Any] = {"query": query, "limit": limit}
+        """GET /search — semantic search across all sources."""
+        params: dict[str, Any] = {"q": query, "limit": limit}
         if project:
-            payload["project"] = project
+            params["project"] = project
 
         async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.post(f"{self.base_url}/search", json=payload)
+            resp = await client.get(f"{self.base_url}/search", params=params)
             resp.raise_for_status()
             return resp.json()
 
