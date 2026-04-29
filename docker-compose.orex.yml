@@ -1,0 +1,17 @@
+# Orex agent service — add to Synaptic's docker-compose.yml on VM 120
+# Either merge into docker-compose.yml or use:
+#   docker compose -f docker-compose.yml -f docker-compose.orex.yml up -d
+services:
+  orex:
+    build: ./orex
+    container_name: orex
+    restart: unless-stopped
+    ports:
+      - "8100:8100"
+    env_file: .env.orex
+    depends_on:
+      - api
+    deploy:
+      resources:
+        limits:
+          memory: 256M
